@@ -32,6 +32,14 @@
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>..\GameBinaries\Newtonsoft.Json.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="NLog">
+      <HintPath>..\TorchBinaries\NLog.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <Reference Include="WindowsBase" />
     <Reference Include="System.Core" />
     <Reference Include="System.Data" />
@@ -46,14 +54,6 @@
     <Reference Include="PresentationFramework" />
   </ItemGroup>
   <ItemGroup>
-    <Reference Include="Newtonsoft.Json">
-      <HintPath>$(SolutionDir)\TorchBinaries\Newtonsoft.Json.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
-    <Reference Include="NLog">
-      <HintPath>$(SolutionDir)\TorchBinaries\Nlog.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
     <Reference Include="Sandbox.Common">
       <HintPath>$(SolutionDir)\GameBinaries\Sandbox.Common.dll</HintPath>
       <Private>False</Private>
@@ -198,7 +198,6 @@
     <Compile Include="Core.Patches\MySession_UpdateComponents_Transpile.cs" />
     <Compile Include="Core.Patches\MyTransportLayer_Tick.cs" />
     <Compile Include="Core\CustomProfiling.cs" />
-    <Compile Include="Core\FastConcurrentQueue.cs" />
     <Compile Include="Core\IProfiler.cs" />
     <Compile Include="Core\StringIndexer.cs" />
     <Compile Include="Core\ProfilerCategory.cs" />
@@ -221,12 +220,22 @@
     <Compile Include="ProfilerPlugin.cs" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="packages.config" />
-  </ItemGroup>
-  <ItemGroup>
     <Page Include="ProfilerControl.xaml" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <ItemGroup>
+    <Content Include="..\manifest.xml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="Zip" BeforeTargets="AfterBuild">
+    <MakeDir Directories="$(SolutionDir)\Build\" />
+    <RemoveDir Directories="$(SolutionDir)\Build\tmp\" Condition="Exists('$(SolutionDir)\Build\tmp\')" />
+    <MakeDir Directories="$(SolutionDir)\Build\tmp\" />
+    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(SolutionDir)\Build\tmp\" />
+    <Copy SourceFiles="$(OutputPath)$(AssemblyName).pdb" DestinationFolder="$(SolutionDir)\Build\tmp\" Condition="Exists('$(OutputPath)$(AssemblyName).pdb')" />
+    <Copy SourceFiles="$(OutputPath)manifest.xml" DestinationFolder="$(SolutionDir)\Build\tmp\" />
+    <Exec Command="powershell -NoProfile -Command &quot;Compress-Archive -Path '$(SolutionDir)\Build\tmp\*' -DestinationPath '$(SolutionDir)\Build\$(MSBuildProjectName).zip' -Force&quot;" />
+    <RemoveDir Directories="$(SolutionDir)\Build\tmp\" />
+  </Target>
   <Import Project="..\TorchUtils\Utils.General\Utils.General.projitems" Label="Shared" />
   <Import Project="..\TorchUtils\Utils.Torch\Utils.Torch.projitems" Label="Shared" />
 </Project>

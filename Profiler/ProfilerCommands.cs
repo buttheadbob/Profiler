@@ -22,6 +22,7 @@ using VRage.Game.ModAPI;
 using VRage.ModAPI;
 using Utils.Torch;
 using TaskUtils = Utils.General.TaskUtils;
+// ReSharper disable InconsistentNaming
 
 namespace Profiler
 {
@@ -74,6 +75,351 @@ namespace Profiler
             });
         }
 
+        [Command("diagnose", "Runs a comprehensive performance diagnostic across all subsystems")]
+        [Permission(MyPromoteLevel.Moderator)]
+        public void Diagnose()
+        {
+            Log.Info("Profile Diagnose Requested");
+            this.CatchAndReportAsync(async () =>
+            {
+                _args = new RequestParamParser(Context.Player, Context.Args);
+                var discordDisplay = Context.Player is null;
+
+                Context.Respond($"Running performance diagnostic, result in {_args.Seconds}s...");
+
+                var gameLoop = new GameLoopProfiler();
+                var grids = new GridProfiler(GameEntityMask.Empty);
+                var blockTypes = new BlockTypeProfiler(GameEntityMask.Empty);
+                var players = new PlayerProfiler(GameEntityMask.Empty);
+                var factions = new FactionProfiler(GameEntityMask.Empty);
+                var physics = new PhysicsProfiler();
+                var session = new SessionComponentsProfiler();
+
+                using (ProfilerResultQueue.Profile(gameLoop))
+                using (ProfilerResultQueue.Profile(grids))
+                using (ProfilerResultQueue.Profile(blockTypes))
+                using (ProfilerResultQueue.Profile(players))
+                using (ProfilerResultQueue.Profile(factions))
+                using (ProfilerResultQueue.Profile(physics))
+                using (ProfilerResultQueue.Profile(session))
+                {
+                    gameLoop.MarkStart();
+                    grids.MarkStart();
+                    blockTypes.MarkStart();
+                    players.MarkStart();
+                    factions.MarkStart();
+                    physics.MarkStart();
+                    session.MarkStart();
+
+                    await Task.Delay(TimeSpan.FromSeconds(_args.Seconds));
+
+                    gameLoop.MarkEnd();
+                    grids.MarkEnd();
+                    blockTypes.MarkEnd();
+                    players.MarkEnd();
+                    factions.MarkEnd();
+                    physics.MarkEnd();
+                    session.MarkEnd();
+                }
+
+                var glResult = gameLoop.GetResult();
+                var gridResult = grids.GetResult();
+                var btResult = blockTypes.GetResult();
+                var playerResult = players.GetResult();
+                var factionResult = factions.GetResult();
+                var physResult = physics.GetResult();
+                var sessionResult = session.GetResult();
+
+                gameLoop.Dispose();
+                grids.Dispose();
+                blockTypes.Dispose();
+                players.Dispose();
+                factions.Dispose();
+                physics.Dispose();
+                session.Dispose();
+
+                // gather cluster grid details on game thread
+                var topClusters = physResult.GetTopEntities(3).ToArray();
+                var clusterGrids = new List<(int Index, string Header, (string Name, int Blocks, double MsPerFrame)[] Grids)>();
+
+                if (topClusters.Length > 0)
+                {
+                    try
+                    {
+                        await VRageUtils.MoveToGameLoop();
+
+                        foreach (var (world, entry, ci) in topClusters.Select((kv, i) => (kv.Key, kv.Entity, i)))
+                        {
+                            var entities = world.GetEntities().OfType<MyCubeGrid>().ToArray();
+                            var gridCount = entities.Length;
+                            var (size, _) = VRageUtils.GetBound(entities.Select(e => e.PositionComp.GetPosition()));
+                            var sizeKm = size / 1000.0;
+                            var msPerFrame = entry.MainThreadTime / physResult.TotalFrameCount;
+
+                            var gridInfos = new List<(string Name, int Blocks, double MsPerFrame)>();
+                            foreach (var grid in entities)
+                            {
+                                if (gridResult.TryGet(grid, out var ge))
+                                {
+                                    var ms = ge.MainThreadTime / gridResult.TotalFrameCount;
+                                    gridInfos.Add((grid.DisplayName, grid.BlocksCount, ms));
+                                }
+                            }
+
+                            var topGrids = gridInfos
+                                .OrderByDescending(x => x.MsPerFrame)
+                                .Take(3)
+                                .ToArray();
+
+                            var header = $"[{ci}] {gridCount} grids, {sizeKm:0.0}km \u2014 {msPerFrame:0.00}ms/f";
+                            clusterGrids.Add((ci, header, topGrids));
+                        }
+                    }
+                    finally
+                    {
+                        await TaskUtils.MoveToThreadPool();
+                    }
+                }
+
+                // player/faction grid counts (game thread, Discord only)
+                var playerGridCounts = new Dictionary<long, int>();
+                var factionGridCounts = new Dictionary<long, int>();
+
+                if (discordDisplay)
+                {
+                    try
+                    {
+                        await VRageUtils.MoveToGameLoop();
+
+                        foreach (var group in MyCubeGridGroups.Static.Logical.Groups)
+                        foreach (var node in group.Nodes)
+                        {
+                            var grid = node.NodeData;
+                            foreach (var ownerId in grid.BigOwners)
+                            {
+                                playerGridCounts.TryGetValue(ownerId, out var pc);
+                                playerGridCounts[ownerId] = pc + 1;
+
+                                var f = MySession.Static.Factions.TryGetPlayerFaction(ownerId);
+                                if (f != null)
+                                {
+                                    factionGridCounts.TryGetValue(f.FactionId, out var fc);
+                                    factionGridCounts[f.FactionId] = fc + 1;
+                                }
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        await TaskUtils.MoveToThreadPool();
+                    }
+                }
+
+                // ----------------------------------------------------------------
+                // build output
+                // ----------------------------------------------------------------
+                var sb = new StringBuilder();
+
+                if (discordDisplay)
+                {
+                    var discordTop = Math.Min(_args.Top, 5);
+                    sb.AppendLine($"**Profiler Diagnose** ({_args.Seconds}s, {glResult.TotalFrameCount} fr)");
+
+                    // frame breakdown (compact single line)
+                    var physTotalMs = physResult.GetTopEntities().Sum(kv => kv.Entity.MainThreadTime) / physResult.TotalFrameCount;
+
+                    var frameItems = new (string Label, double Ms)[]
+                    {
+                        ("Upd", GetCategoryMs(glResult, ProfilerCategory.Update)),
+                        ("Phys", physTotalMs),
+                        ("Net", GetCategoryMs(glResult, ProfilerCategory.UpdateNetwork)),
+                        ("Rep", GetCategoryMs(glResult, ProfilerCategory.UpdateReplication)),
+                        ("Ses", GetCategoryMs(glResult, ProfilerCategory.UpdateSessionComponents)),
+                        ("GPS", GetCategoryMs(glResult, ProfilerCategory.UpdateGps)),
+                        ("PWait", GetCategoryMs(glResult, ProfilerCategory.UpdateParallelWait)),
+                        ("Lock", GetCategoryMs(glResult, ProfilerCategory.Lock)),
+                    };
+
+                    var totalShown = frameItems.Sum(x => x.Ms);
+                    var frameParts = frameItems
+                        .Where(x => x.Ms > 0)
+                        .Select(x =>
+                        {
+                            var pct = totalShown > 0 ? x.Ms / totalShown * 100 : 0;
+                            return $"{x.Label}: {x.Ms:0.0}ms ({pct:0.0}%)";
+                        }).ToList();
+
+                    if (frameParts.Count > 0)
+                    {
+                        sb.Append("**Frame** ");
+                        sb.AppendLine(string.Join(" | ", frameParts));
+                    }
+
+                    // top grids
+                    var gridEntries = gridResult.GetTopEntities(discordTop).ToArray();
+                    if (gridEntries.Length > 0)
+                    {
+                        sb.AppendLine("**Top Grids**");
+                        foreach (var (grid, entry) in gridEntries)
+                        {
+                            var ms = entry.MainThreadTime / gridResult.TotalFrameCount;
+                            sb.AppendLine($"> {grid.DisplayName} \u2014 {ms:0.00}ms/f, {grid.BlocksCount} blk");
+                        }
+                    }
+
+                    // top block types
+                    var btEntries = btResult.GetTopEntities(discordTop).ToArray();
+                    if (btEntries.Length > 0)
+                    {
+                        sb.AppendLine("**Top Block Types**");
+                        foreach (var (type, entry) in btEntries)
+                        {
+                            var ms = entry.MainThreadTime / btResult.TotalFrameCount;
+                            sb.AppendLine($"> {BlockTypeToString(type)} \u2014 {ms:0.00}ms/f");
+                        }
+                    }
+
+                    // top players
+                    var playerEntries = playerResult.GetTopEntities(discordTop).ToArray();
+                    if (playerEntries.Length > 0)
+                    {
+                        sb.AppendLine("**Top Players**");
+                        foreach (var (identity, entry) in playerEntries)
+                        {
+                            var ms = entry.MainThreadTime / playerResult.TotalFrameCount;
+                            var gc = playerGridCounts.TryGetValue(identity.IdentityId, out var c) ? c : 0;
+                            sb.AppendLine($"> {identity.DisplayName} \u2014 {ms:0.00}ms/f, {gc} grids");
+                        }
+                    }
+
+                    // top factions
+                    var factionEntries = factionResult.GetTopEntities(discordTop).ToArray();
+                    if (factionEntries.Length > 0)
+                    {
+                        sb.AppendLine("**Top Factions**");
+                        foreach (var (faction, entry) in factionEntries)
+                        {
+                            var ms = entry.MainThreadTime / factionResult.TotalFrameCount;
+                            var gc = factionGridCounts.TryGetValue(faction.FactionId, out var c) ? c : 0;
+                            sb.AppendLine($"> [{faction.Tag}] \u2014 {ms:0.00}ms/f, {gc} grids");
+                        }
+                    }
+
+                    // physics clusters
+                    if (clusterGrids.Count > 0)
+                    {
+                        sb.AppendLine("**Top Physics Clusters**");
+                        foreach (var (_, header, clusterGridList) in clusterGrids)
+                        {
+                            sb.AppendLine($"> {header}");
+                            foreach (var (name, blocks, ms) in clusterGridList)
+                            {
+                                sb.AppendLine($"> \u2014 {name}, {ms:0.00}ms/f, {blocks} blk");
+                            }
+                        }
+                    }
+
+                    // session components
+                    var sessionEntries = sessionResult.GetTopEntities(discordTop).ToArray();
+                    if (sessionEntries.Length > 0)
+                    {
+                        sb.AppendLine("**Top Session Components**");
+                        foreach (var (comp, entry) in sessionEntries)
+                        {
+                            var ms = entry.MainThreadTime / sessionResult.TotalFrameCount;
+                            sb.AppendLine($"> {comp.GetType().Name} \u2014 {ms:0.00}ms/f");
+                        }
+                    }
+                }
+                else
+                {
+                    sb.AppendLine($"Profiler Diagnose ({_args.Seconds}s, {glResult.TotalFrameCount} fr)");
+
+                    // frame breakdown
+                    var physTotalMs = physResult.GetTopEntities().Sum(kv => kv.Entity.MainThreadTime) / physResult.TotalFrameCount;
+
+                    var frameItems = new (string Label, double Ms)[]
+                    {
+                        ("Upd", GetCategoryMs(glResult, ProfilerCategory.Update)),
+                        ("Phys", physTotalMs),
+                        ("Net", GetCategoryMs(glResult, ProfilerCategory.UpdateNetwork)),
+                        ("Rep", GetCategoryMs(glResult, ProfilerCategory.UpdateReplication)),
+                        ("Ses", GetCategoryMs(glResult, ProfilerCategory.UpdateSessionComponents)),
+                        ("GPS", GetCategoryMs(glResult, ProfilerCategory.UpdateGps)),
+                        ("Lock", GetCategoryMs(glResult, ProfilerCategory.Lock)),
+                    };
+
+                    var totalShown = frameItems.Sum(x => x.Ms);
+                    sb.Append("-- Frame -- ");
+                    var frameParts = new List<string>();
+                    foreach (var (label, ms) in frameItems.Where(x => x.Ms > 0))
+                    {
+                        var pct = totalShown > 0 ? ms / totalShown * 100 : 0;
+                        frameParts.Add($"{label}:{ms:0.0}ms({pct:0}%)");
+                    }
+                    sb.AppendLine(string.Join(", ", frameParts));
+
+                    // top grids
+                    sb.AppendLine("-- Top Grids --");
+                    foreach (var (grid, entry) in gridResult.GetTopEntities(_args.Top))
+                    {
+                        var ms = entry.MainThreadTime / gridResult.TotalFrameCount;
+                        sb.AppendLine($"\"{grid.DisplayName}\": {ms:0.00}ms/f, {grid.BlocksCount} blk");
+                    }
+
+                    // top block types
+                    sb.AppendLine("-- Top Block Types --");
+                    foreach (var (type, entry) in btResult.GetTopEntities(_args.Top))
+                    {
+                        var ms = entry.MainThreadTime / btResult.TotalFrameCount;
+                        sb.AppendLine($"{BlockTypeToString(type)}: {ms:0.00}ms/f");
+                    }
+
+                    // top players
+                    sb.AppendLine("-- Top Players --");
+                    foreach (var (identity, entry) in playerResult.GetTopEntities(_args.Top))
+                    {
+                        var ms = entry.MainThreadTime / playerResult.TotalFrameCount;
+                        sb.AppendLine($"{identity.DisplayName}: {ms:0.00}ms/f");
+                    }
+
+                    // top factions
+                    sb.AppendLine("-- Top Factions --");
+                    foreach (var (faction, entry) in factionResult.GetTopEntities(_args.Top))
+                    {
+                        var ms = entry.MainThreadTime / factionResult.TotalFrameCount;
+                        sb.AppendLine($"[{faction.Tag}]: {ms:0.00}ms/f");
+                    }
+
+                    // physics clusters
+                    if (clusterGrids.Count > 0)
+                    {
+                        sb.AppendLine("-- Top Physics Clusters --");
+                        foreach (var (_, header, clusterGridList) in clusterGrids)
+                        {
+                            var gridNames = string.Join(", ", clusterGridList.Select(g => $"\"{g.Name}\""));
+                            sb.AppendLine($"{header}: {gridNames}");
+                        }
+                    }
+
+                    // session components
+                    sb.AppendLine("-- Top Session Components --");
+                    foreach (var (comp, entry) in sessionResult.GetTopEntities(_args.Top))
+                    {
+                        var ms = entry.MainThreadTime / sessionResult.TotalFrameCount;
+                        sb.AppendLine($"{comp.GetType().Name}: {ms:0.00}ms/f");
+                    }
+                }
+
+                Context.Respond(sb.ToString());
+            });
+        }
+
+        static double GetCategoryMs(BaseProfilerResult<ProfilerCategory> result, ProfilerCategory category)
+        {
+            return result.TryGet(category, out var e) ? e.MainThreadTime / result.TotalFrameCount : 0;
+        }
+
         [Command("frames", "Profiles game frames", HelpText)]
         [Permission(MyPromoteLevel.Moderator)]
         public void ProfileFrames()
@@ -82,7 +428,7 @@ namespace Profiler
             {
                 _args = new RequestParamParser(Context.Player, Context.Args);
 
-                using (var profiler = new GameLoopProfiler())
+                using var profiler = new GameLoopProfiler();
                 using (ProfilerResultQueue.Profile(profiler))
                 {
                     Context.Respond($"Started profiling frames, result in {_args.Seconds}s");
@@ -125,7 +471,7 @@ namespace Profiler
                 _args = new RequestParamParser(Context.Player, Context.Args);
                 var mask = new GameEntityMask(_args.PlayerMask, _args.GridMask, _args.FactionMask);
 
-                using (var profiler = new BlockTypeProfiler(mask))
+                using var profiler = new BlockTypeProfiler(mask);
                 using (ProfilerResultQueue.Profile(profiler))
                 {
                     Context.Respond($"Started profiling by block type, result in {_args.Seconds}s");
@@ -154,7 +500,7 @@ namespace Profiler
                 _args = new RequestParamParser(Context.Player, Context.Args);
                 var mask = new GameEntityMask(_args.PlayerMask, _args.GridMask, _args.FactionMask);
 
-                using (var profiler = new BlockDefinitionProfiler(mask))
+                using var profiler = new BlockDefinitionProfiler(mask);
                 using (ProfilerResultQueue.Profile(profiler))
                 {
                     Context.Respond($"Started profiling by block definition, result in {_args.Seconds}s");
@@ -192,7 +538,7 @@ namespace Profiler
             {
                 _args = new RequestParamParser(Context.Player, Context.Args);
                 var mask = new GameEntityMask(_args.PlayerMask, _args.GridMask, _args.FactionMask);
-                using (var profiler = GetProfiler(mask))
+                using var profiler = GetProfiler(mask);
                 using (ProfilerResultQueue.Profile(profiler))
                 {
                     Context.Respond($"Started profiling grids, result in {_args.Seconds}s");
@@ -259,7 +605,7 @@ namespace Profiler
                 _args = new RequestParamParser(Context.Player, Context.Args);
                 var mask = new GameEntityMask(_args.PlayerMask, _args.GridMask, _args.FactionMask);
 
-                using (var profiler = new FactionProfiler(mask))
+                using var profiler = new FactionProfiler(mask);
                 using (ProfilerResultQueue.Profile(profiler))
                 {
                     Context.Respond($"Started profiling factions, result in {_args.Seconds}s");
@@ -283,7 +629,7 @@ namespace Profiler
                 _args = new RequestParamParser(Context.Player, Context.Args);
                 var mask = new GameEntityMask(_args.PlayerMask, _args.GridMask, _args.FactionMask);
 
-                using (var profiler = new PlayerProfiler(mask))
+                using var profiler = new PlayerProfiler(mask);
                 using (ProfilerResultQueue.Profile(profiler))
                 {
                     Context.Respond($"Started profiling players, result in {_args.Seconds}s");
@@ -307,7 +653,7 @@ namespace Profiler
                 _args = new RequestParamParser(Context.Player, Context.Args);
                 var mask = new GameEntityMask(_args.PlayerMask, _args.GridMask, _args.FactionMask);
 
-                using (var profiler = new UserScriptProfiler(mask))
+                using var profiler = new UserScriptProfiler(mask);
                 using (ProfilerResultQueue.Profile(profiler))
                 {
                     Context.Respond($"Started profiling scripts, result in {_args.Seconds}s");
@@ -336,7 +682,7 @@ namespace Profiler
             this.CatchAndReportAsync(async () =>
             {
                 _args = new RequestParamParser(Context.Player, Context.Args);
-                using (var profiler = new SessionComponentsProfiler())
+                using var profiler = new SessionComponentsProfiler();
                 using (ProfilerResultQueue.Profile(profiler))
                 {
                     Context.Respond($"Started profiling sessions, result in {_args.Seconds}s");
@@ -358,7 +704,7 @@ namespace Profiler
             this.CatchAndReportAsync(async () =>
             {
                 _args = new RequestParamParser(Context.Player, Context.Args);
-                using (var profiler = new EntityTypeProfiler())
+                using var profiler = new EntityTypeProfiler();
                 using (ProfilerResultQueue.Profile(profiler))
                 {
                     Context.Respond($"Started profiling entity types, result in {_args.Seconds}s");
@@ -414,7 +760,7 @@ namespace Profiler
                     return;
                 }
 
-                using (var profiler = new PhysicsProfiler())
+                using var profiler = new PhysicsProfiler();
                 using (ProfilerResultQueue.Profile(profiler))
                 {
                     Log.Warn("Physics profiling needs to sync all threads! This may cause performance impact.");

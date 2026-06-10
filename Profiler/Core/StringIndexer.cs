@@ -11,6 +11,7 @@ namespace Profiler.Core
         public static readonly StringIndexer Instance = new StringIndexer();
 
         readonly List<string> _mapping;
+        readonly object _lock = new object();
 
         StringIndexer()
         {
@@ -24,21 +25,27 @@ namespace Profiler.Core
                 throw new Exception("method name null");
             }
 
-            var existingIndex = _mapping.IndexOf(methodName);
-            if (existingIndex >= 0) return existingIndex;
+            lock (_lock)
+            {
+                var existingIndex = _mapping.IndexOf(methodName);
+                if (existingIndex >= 0) return existingIndex;
 
-            _mapping.Add(methodName);
-            return _mapping.Count - 1;
+                _mapping.Add(methodName);
+                return _mapping.Count - 1;
+            }
         }
 
         public string StringAt(int index)
         {
-            if (index >= _mapping.Count)
+            lock (_lock)
             {
-                throw new IndexOutOfRangeException($"length: {_mapping.Count}, given index: {index}");
-            }
+                if (index >= _mapping.Count)
+                {
+                    throw new IndexOutOfRangeException($"length: {_mapping.Count}, given index: {index}");
+                }
 
-            return _mapping[index];
+                return _mapping[index];
+            }
         }
     }
 }

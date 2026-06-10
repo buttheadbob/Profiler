@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Threading;
 using System.Threading.Tasks;
 using NLog;
@@ -13,12 +14,12 @@ namespace Profiler.Core
     public static class ProfilerResultQueue
     {
         static readonly ILogger Log = LogManager.GetCurrentClassLogger();
-        static readonly FastConcurrentQueue<ProfilerResult> _profilerResults;
+        static readonly ConcurrentQueue<ProfilerResult> _profilerResults;
         static readonly ConcurrentCachingList<IProfiler> _profilers;
 
         static ProfilerResultQueue()
         {
-            _profilerResults = new FastConcurrentQueue<ProfilerResult>();
+            _profilerResults = new ConcurrentQueue<ProfilerResult>();
             _profilers = new ConcurrentCachingList<IProfiler>();
         }
 
@@ -35,8 +36,6 @@ namespace Profiler.Core
 
         internal static void Enqueue(in ProfilerResult result)
         {
-            if (_profilers.Count == 0) return;
-
             _profilerResults.Enqueue(result);
         }
 
@@ -44,26 +43,41 @@ namespace Profiler.Core
         {
             while (!canceller.IsCancellationRequested)
             {
-                _profilerResults.Alternate();
-                _profilers.ApplyChanges();
-
-                var index = 0;
-                while (_profilerResults.TryDequeue(ref index, out var result))
+                try
                 {
-                    foreach (var profiler in _profilers)
+                    _profilers.ApplyChanges();
+
+                    var dequeued = false;
+                    while (_profilerResults.TryDequeue(out var result))
                     {
-                        try
+                        dequeued = true;
+                        foreach (var profiler in _profilers)
                         {
-                            profiler.ReceiveProfilerResult(result);
-                        }
-                        catch (Exception e)
-                        {
-                            Log.Error($"{profiler}: {e.Message}");
+                            try
+                            {
+                                profiler.ReceiveProfilerResult(result);
+                            }
+                            catch (Exception e)
+                            {
+                                Log.Error($"{profiler}: {e.Message}");
+                            }
                         }
                     }
-                }
 
-                await Task.Delay(TimeSpan.FromSeconds(.1f), canceller);
+                    if (!dequeued)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(.1f), canceller);
+                    }
+                }
+                catch (OperationCanceledException) when (canceller.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception e)
+                {
+                    Log.Warn(e, "Profiler consumer loop crashed; restarting after delay");
+                    await Task.Delay(TimeSpan.FromSeconds(1), canceller);
+                }
             }
         }
 
