@@ -130,14 +130,6 @@ namespace Profiler
                 var physResult = physics.GetResult();
                 var sessionResult = session.GetResult();
 
-                gameLoop.Dispose();
-                grids.Dispose();
-                blockTypes.Dispose();
-                players.Dispose();
-                factions.Dispose();
-                physics.Dispose();
-                session.Dispose();
-
                 // gather cluster grid details on game thread
                 var topClusters = physResult.GetTopEntities(3).ToArray();
                 var clusterGrids = new List<(int Index, string Header, (string Name, int Blocks, double MsPerFrame)[] Grids)>();
@@ -410,6 +402,14 @@ namespace Profiler
                         sb.AppendLine($"{comp.GetType().Name}: {ms:0.00}ms/f");
                     }
                 }
+
+                gameLoop.Dispose();
+                grids.Dispose();
+                blockTypes.Dispose();
+                players.Dispose();
+                factions.Dispose();
+                physics.Dispose();
+                session.Dispose();
 
                 Context.Respond(sb.ToString());
             });
