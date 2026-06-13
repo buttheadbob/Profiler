@@ -113,6 +113,8 @@ namespace Profiler
 
                     await Task.Delay(TimeSpan.FromSeconds(_args.Seconds));
 
+                    await Task.Delay(150);
+
                     gameLoop.MarkEnd();
                     grids.MarkEnd();
                     blockTypes.MarkEnd();

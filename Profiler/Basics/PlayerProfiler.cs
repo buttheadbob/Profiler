@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using System.Linq;
 using Profiler.Core;
 using Sandbox.Game.Entities;
 using Sandbox.Game.World;
@@ -25,7 +26,7 @@ namespace Profiler.Basics
             {
                 if (_mask.TestAll(grid))
                 {
-                    foreach (var ownerId in grid.BigOwners)
+                    foreach (var ownerId in grid.BigOwners.ToList())
                     {
                         if (MySession.Static.Players.TryGetIdentity(ownerId) is { } player)
                         {

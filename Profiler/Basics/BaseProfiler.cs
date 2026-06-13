@@ -26,6 +26,8 @@ namespace Profiler.Basics
 
         ulong _startFrameCount;
         DateTime _startTime;
+        ulong _endFrameCount;
+        DateTime _endTime;
         bool _ended;
 
         protected BaseProfiler()
@@ -49,6 +51,8 @@ namespace Profiler.Basics
         /// </summary>
         public virtual void MarkEnd()
         {
+            _endFrameCount = VRageUtils.CurrentGameFrameCount;
+            _endTime = DateTime.UtcNow;
             _ended = true;
         }
 
@@ -91,8 +95,10 @@ namespace Profiler.Basics
         /// <returns></returns>
         public BaseProfilerResult<K> GetResult()
         {
-            var totalFrameCount = VRageUtils.CurrentGameFrameCount - _startFrameCount;
-            var totalTime = (DateTime.UtcNow - _startTime).TotalMilliseconds;
+            var endFrame = _ended ? _endFrameCount : VRageUtils.CurrentGameFrameCount;
+            var endTime = _ended ? _endTime : DateTime.UtcNow;
+            var totalFrameCount = endFrame - _startFrameCount;
+            var totalTime = (endTime - _startTime).TotalMilliseconds;
 
             // copy here so that we wont have concurrency issues down the road
             // https://stackoverflow.com/questions/11692389

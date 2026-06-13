@@ -20,7 +20,7 @@ namespace Profiler.Core.Patches
         static readonly int MethodIndex = StringIndexer.Instance.IndexOf($"{typeof(MyPhysics).FullName}#StepSingleWorld");
         static readonly MyConcurrentHashSet<object> _flags = new();
 
-        static bool _simulatesParallel = true;
+        static volatile bool _simulatesParallel = true;
 
         public static void FlagContinuous(object flag)
         {
