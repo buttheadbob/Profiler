@@ -211,6 +211,8 @@
     <Compile Include="Interactive\PhysicsParamParser.cs" />
     <Compile Include="Interactive\PhysicsTakeMeClient.cs" />
     <Compile Include="Interactive\RequestParamParser.cs" />
+    <Compile Include="DiagnoseResult.cs" />
+    <Compile Include="ProfilerApi.cs" />
     <Compile Include="ProfilerCommands.cs" />
     <Compile Include="ProfilerConfig.cs" />
     <Compile Include="ProfilerControl.xaml.cs" />
